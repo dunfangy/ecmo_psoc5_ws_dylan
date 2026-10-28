@@ -27,7 +27,7 @@
 #include "ADC_TS410_SAR.h"
 
 #define ADC_TS410_NUMBER_OF_CHANNELS    (4u)
-#define ADC_TS410_SAMPLE_MODE           (0u)
+#define ADC_TS410_SAMPLE_MODE           (1u)
 #define ADC_TS410_CLOCK_SOURCE          (0u)
 
 extern int16  ADC_TS410_finalArray[ADC_TS410_NUMBER_OF_CHANNELS];

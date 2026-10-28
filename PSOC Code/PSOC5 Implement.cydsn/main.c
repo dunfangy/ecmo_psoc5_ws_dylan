@@ -42,7 +42,7 @@ static const float32 changeToleranceInterval = 0.3;
 
 volatile static float32 savedADC = NAN;
 volatile int16_t adcData[ADC_SAMPLES_PER_PACKET*ADC_NUM_CHANNELS];
-volatile int16_t pressureData[ADC_PRESSURE_CHANNELS];
+volatile int32_t pressureData[ADC_PRESSURE_CHANNELS];
 
 /* Foreground variables */
 static volatile uint16_t adcTimerCount = 0;
@@ -131,7 +131,7 @@ CY_ISR (Timer_Interrupt_Handler)
         // Check conversion status without blocking
         adcKick = true;            
         // Start next conversion
-        ADC_TS410_StartConvert();    
+        // ADC_TS410_StartConvert();    
     }
 
     if(timerCountDataCompare == dataCompareInterval){
@@ -218,7 +218,7 @@ int main(void)
     /*Set up the NVIC vector of the ISR that would be called 10ms later*/
     Timer_Interrupt_StartEx(Timer_Interrupt_Handler);
     
-    ADC_TS410_StartConvert();
+    //ADC_TS410_StartConvert();
     ADC_DelSig_StartConvert();
 
     Timer_ISR_Start();
@@ -235,7 +235,7 @@ int main(void)
             packetsize = 0;
             opcode = dataGood;
 
-
+            /*
             uint32_t conversionStatus = ADC_TS410_IsEndConversion(ADC_TS410_WAIT_FOR_RESULT);
             if (conversionStatus) {
                 for (uint16_t i = 0; i < ADC_NUM_CHANNELS; i++) {
@@ -247,12 +247,44 @@ int main(void)
                 for (uint16_t i = 0; i < ADC_NUM_CHANNELS; i++) {
                     adcData[i] = -1000;
                 }
-            }    
+            }    */
+            
+            static bool sarFault = false;
+            bool sarDone = false;
+            if (!sarFault) {
+                (void)ADC_TS410_IsEndConversion(ADC_TS410_RETURN_STATUS);
+                ADC_TS410_StartConvert();
+                for (uint8_t n = 0; n < 10u; n++) {
+                    if (ADC_TS410_IsEndConversion(ADC_TS410_RETURN_STATUS)) {
+                        sarDone = true;
+                        break;
+                    }
+                    CyDelay(1u);
+                }
+                if (!sarDone) {
+                    ADC_TS410_Stop();
+                    sarFault = true;
+                }
+            }
+
+            for (uint16_t i = 0; i < ADC_NUM_CHANNELS; i++) {
+                if (sarDone) {
+                    adcData[i] = ADC_TS410_GetResult16(i);
+                }
+            }
+            
             // Pack ADC Data (TS410)
             for (uint8_t i = 0; i < ADC_NUM_CHANNELS; i++) {
-                float32 ADCVolts = /*(3.3/2.739) *  */ ADC_TS410_CountsTo_Volts(adcData[i]);
+                //float32 ADCVolts = /*(3.3/2.739) *  */ ADC_TS410_CountsTo_Volts(adcData[i]);
+                float32 ADCVolts;
+                if (sarDone) {
+                    ADCVolts = ADC_TS410_CountsTo_Volts(adcData[i]);
+                }
+                else {
+                    ADCVolts = NAN;
+                }
                 /*Check if data flucaute a lot, if so send warning OPCODE, currently it only checks Channel 3*/
-                if(checkData && i == (ADC_NUM_CHANNELS - 1)){
+                if(sarDone && checkData && i == (ADC_NUM_CHANNELS - 1)){
                     checkData = false;
                     if(!isnan(savedADC) && fabsf(savedADC - ADCVolts) >= changeToleranceInterval){
                         opcode |= ADCJumpWarn;
@@ -260,9 +292,20 @@ int main(void)
                     savedADC = ADCVolts;
                 }
                 /*If ADC value is out of boundary, there might be calibration or hardware setup issue, send another warning OPCODE*/
-                if(ADCVolts > (5 + boundaryToleranceInterval) || ADCVolts < (0 - boundaryToleranceInterval)){
+                /*if(ADCVolts > (5 + boundaryToleranceInterval) || ADCVolts < (0 - boundaryToleranceInterval)){
+                    opcode |= ADCOORWarn;
+                }*/
+                
+                /*
+                if (adcData[i] <= 0 || adcData[i] >= 4095) {
                     opcode |= ADCOORWarn;
                 }
+                */
+                
+                if (ADCVolts >= 4.9987f || ADCVolts < -0.1f) {
+                    opcode |= ADCOORWarn;
+                }
+                
                 /*Pack ADC value to the data packet that would be later sent to RPI through UART*/
                 float2Bytes(ADCVolts, &packet[packetsize]);
                 packetsize += sizeof(float32);
@@ -272,10 +315,13 @@ int main(void)
             for (uint8_t i = 0; i < ADC_PRESSURE_CHANNELS; i++) {
                 float32 pressureVolts = /*(3.3/3.3) */ ADC_DelSig_CountsTo_Volts(pressureData[i]);
 
-                if (pressureVolts > (5 + boundaryToleranceInterval) || pressureVolts < (0 - boundaryToleranceInterval)){
+                /* if (pressureVolts > (5 + boundaryToleranceInterval) || pressureVolts < (0 - boundaryToleranceInterval)){
+                    opcode |= PressureOORWarn;
+                }*/
+                
+                if (pressureVolts > 0.064f || pressureVolts < -0.064f) {
                     opcode |= PressureOORWarn;
                 }
-
                 float2Bytes(pressureVolts, &packet[packetsize]);
                 packetsize += sizeof(float32);
             }
@@ -336,6 +382,10 @@ static bool OEM_Read2(uint8_t *msb, uint8_t *lsb, uint32_t timeout_ms)
         }
         CyDelay(1);
         waited++;
+    }
+    
+    if (count != 2u) {
+        return false;
     }
     
     *msb = bytes[0];
